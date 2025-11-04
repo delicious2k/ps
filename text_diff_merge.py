@@ -22,12 +22,15 @@ class DiffBlock:
         right_range: Tuple[int, int],
         left_tag: Optional[str] = None,
         right_tag: Optional[str] = None,
+        merge_segment_index: Optional[int] = None,
     ) -> None:
         self.tag = tag
         self.left_range = left_range
         self.right_range = right_range
         self.left_tag = left_tag
         self.right_tag = right_tag
+        self.merge_segment_index = merge_segment_index
+        self.decision: Optional[str] = None
 
 
 class DiffMergeApp:
@@ -44,6 +47,7 @@ class DiffMergeApp:
         self.current_block_index: Optional[int] = None
         self._sync_in_progress = False
         self.line_number_canvases: Dict[tk.Text, tk.Canvas] = {}
+        self.merge_segments: List[Dict[str, Any]] = []
 
         self._build_ui()
 
@@ -81,6 +85,9 @@ class DiffMergeApp:
             side=tk.LEFT, padx=2
         )
         tk.Button(button_bar, text="Copy Both", command=self.merge_both).pack(
+            side=tk.LEFT, padx=2
+        )
+        tk.Button(button_bar, text="Discard", command=self.merge_discard).pack(
             side=tk.LEFT, padx=2
         )
         tk.Button(button_bar, text="Clear Merge", command=self.clear_merge).pack(
@@ -386,17 +393,26 @@ class DiffMergeApp:
         self._update_line_numbers(widget)
         self.update_status(f"Loaded {side} file: {path}")
 
+    def _widget_lines(self, widget: tk.Text) -> List[str]:
+        contents = widget.get("1.0", tk.END)
+        if contents.endswith("\n"):
+            contents = contents[:-1]
+        return contents.splitlines(keepends=True)
+
     def compare_texts(self) -> None:
-        left_lines = self.left_text.get("1.0", tk.END).splitlines()
-        right_lines = self.right_text.get("1.0", tk.END).splitlines()
+        left_lines = self._widget_lines(self.left_text)
+        right_lines = self._widget_lines(self.right_text)
 
         self._clear_highlights()
         self.blocks.clear()
+        self.merge_segments.clear()
         self.current_block_index = None
 
         matcher = difflib.SequenceMatcher(None, left_lines, right_lines)
         for index, (tag, i1, i2, j1, j2) in enumerate(matcher.get_opcodes()):
             if tag == "equal":
+                segment_text = "".join(left_lines[i1:i2])
+                self.merge_segments.append({"type": "equal", "text": segment_text})
                 continue
 
             left_tag = None
@@ -419,9 +435,20 @@ class DiffMergeApp:
                     j1,
                     j2,
                 )
-            self.blocks.append(
-                DiffBlock(tag, (i1, i2), (j1, j2), left_tag=left_tag, right_tag=right_tag)
+            block = DiffBlock(
+                tag,
+                (i1, i2),
+                (j1, j2),
+                left_tag=left_tag,
+                right_tag=right_tag,
+                merge_segment_index=len(self.merge_segments),
             )
+            self.blocks.append(block)
+            self.merge_segments.append(
+                {"type": "diff", "text": "", "block_index": len(self.blocks) - 1}
+            )
+
+        self._render_merge_text()
 
         if not self.blocks:
             self.update_status("The documents are identical.")
@@ -430,6 +457,12 @@ class DiffMergeApp:
         self.update_status(f"Found {len(self.blocks)} differing block(s).")
         self.current_block_index = 0
         self._apply_current_block()
+
+    def _render_merge_text(self) -> None:
+        merged_text = "".join(segment["text"] for segment in self.merge_segments)
+        self.merge_text.delete("1.0", tk.END)
+        self.merge_text.insert("1.0", merged_text)
+        self._update_line_numbers(self.merge_text)
 
     def _highlight_block(
         self, widget: tk.Text, tag_name: str, style_tag: str, start: int, end: int
@@ -480,8 +513,13 @@ class DiffMergeApp:
         if block.right_tag:
             self._apply_current_tag(self.right_text, block.right_range)
 
+        decision = block.decision
+        if decision is None:
+            decision_text = "Decision: pending"
+        else:
+            decision_text = f"Decision: {decision.capitalize()}"
         self.update_status(
-            f"Viewing difference {self.current_block_index + 1} of {len(self.blocks)}"
+            f"Viewing difference {self.current_block_index + 1} of {len(self.blocks)} - {decision_text}"
         )
 
     def _apply_current_tag(self, widget: tk.Text, text_range: Tuple[int, int]) -> None:
@@ -503,11 +541,17 @@ class DiffMergeApp:
     def merge_both(self) -> None:
         self._merge_choice(prefer="both")
 
+    def merge_discard(self) -> None:
+        self._merge_choice(prefer="discard")
+
     def _merge_choice(self, prefer: str) -> None:
         if self.current_block_index is None:
             messagebox.showinfo("Merge", "No difference selected.")
             return
         block = self.blocks[self.current_block_index]
+        if block.merge_segment_index is None:
+            return
+
         left_text = self._extract_range(self.left_text, block.left_range)
         right_text = self._extract_range(self.right_text, block.right_range)
 
@@ -515,25 +559,29 @@ class DiffMergeApp:
             chosen = left_text
         elif prefer == "right":
             chosen = right_text
-        else:  # both
+        elif prefer == "both":
             chosen = left_text + right_text
-
-        if not chosen:
-            messagebox.showinfo("Merge", "Nothing to merge for this choice.")
+        elif prefer == "discard":
+            chosen = ""
+        else:
             return
 
-        if not self.merge_text.get("1.0", tk.END).strip():
-            insert_point = "1.0"
-        else:
-            insert_point = tk.END
-        self.merge_text.insert(insert_point, chosen)
-        self._update_line_numbers(self.merge_text)
-        self.update_status("Appended selection to the merged document.")
+        self.merge_segments[block.merge_segment_index]["text"] = chosen
+        block.decision = prefer if prefer in {"left", "right", "both", "discard"} else None
+        self._render_merge_text()
+        self._apply_current_block()
 
     def clear_merge(self) -> None:
-        self.merge_text.delete("1.0", tk.END)
-        self._update_line_numbers(self.merge_text)
-        self.update_status("Cleared merged document.")
+        for block in self.blocks:
+            block.decision = None
+        for segment in self.merge_segments:
+            if segment.get("type") == "diff":
+                segment["text"] = ""
+        self._render_merge_text()
+        if self.current_block_index is not None:
+            self._apply_current_block()
+        else:
+            self.update_status("Cleared merged document.")
 
     def save_merge(self) -> None:
         contents = self.merge_text.get("1.0", tk.END)
