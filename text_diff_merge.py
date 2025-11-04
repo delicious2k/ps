@@ -324,9 +324,17 @@ class DiffMergeApp:
         try:
             widget.see(index)
             widget.update_idletasks()
-            pixels_from_start = widget.count("1.0", index, "ypixels")[0]
-            total_pixels = max(widget.count("1.0", "end", "ypixels")[0], 1)
-            widget.yview_moveto(pixels_from_start / total_pixels)
+            pixels_from_start = widget.count("1.0", index, "ypixels")
+            total_pixels = widget.count("1.0", "end", "ypixels")
+            if (
+                pixels_from_start
+                and total_pixels
+                and pixels_from_start[0] is not None
+                and total_pixels[0]
+            ):
+                widget.yview_moveto(pixels_from_start[0] / total_pixels[0])
+            else:
+                raise tk.TclError
         except tk.TclError:
             fraction = (target_line - 1) / max(total_lines - 1, 1)
             widget.yview_moveto(fraction)
