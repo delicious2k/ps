@@ -13,6 +13,15 @@ from tkinter import filedialog, messagebox
 from typing import Any, Dict, List, Optional, Tuple
 
 
+DECISION_SYMBOLS = {
+    None: "○",
+    "left": "⟵",
+    "right": "⟶",
+    "both": "⇄",
+    "discard": "✕",
+}
+
+
 class DiffBlock:
     """Container describing a single difference block."""
 
@@ -234,12 +243,13 @@ class DiffMergeApp:
         spacer_lines = self._spacer_line_numbers(widget)
         visible_lines = max(total_lines - len(spacer_lines), 1)
         digits = max(2, len(str(visible_lines)))
-        pixel_width = digits * 8 + 12
+        pixel_width = digits * 8 + 24
         if canvas.winfo_width() != pixel_width:
             canvas.config(width=pixel_width)
 
         index = widget.index("@0,0")
         font = widget.cget("font")
+        indicator_map = self._indicator_map_for_widget(widget, spacer_lines)
         spacer_set = set(spacer_lines)
         while True:
             dline = widget.dlineinfo(index)
@@ -253,15 +263,45 @@ class DiffMergeApp:
                 index = next_index
                 continue
             adjusted_number = line_number - bisect_left(spacer_lines, line_number)
+            symbol = indicator_map.get(adjusted_number)
+            display_number = str(max(adjusted_number, 1))
+            if symbol:
+                display_text = f"{symbol} {display_number}"
+            else:
+                display_text = display_number
             canvas.create_text(
                 pixel_width - 6,
                 y,
                 anchor="ne",
-                text=str(max(adjusted_number, 1)),
+                text=display_text,
                 font=font,
                 fill="#555555",
             )
             index = next_index
+
+    def _indicator_map_for_widget(
+        self, widget: tk.Text, spacer_lines: List[int]
+    ) -> Dict[int, str]:
+        mapping: Dict[int, str] = {}
+        if not self.blocks:
+            return mapping
+        for block in self.blocks:
+            block_range = (
+                block.left_range if widget is self.left_text else block.right_range
+            )
+            start, end = block_range
+            if start == end:
+                continue
+            line_number = start + 1
+            visible_line = line_number - bisect_left(spacer_lines, line_number)
+            if visible_line < 1:
+                visible_line = 1
+            mapping[visible_line] = self._decision_symbol(block.decision)
+        return mapping
+
+    def _refresh_decision_indicators(self) -> None:
+        for widget in (self.left_text, self.right_text):
+            self._update_line_numbers(widget)
 
     def _spacer_line_numbers(self, widget: tk.Text) -> List[int]:
         ranges = widget.tag_ranges("spacer")
@@ -511,12 +551,8 @@ class DiffMergeApp:
 
         matcher = difflib.SequenceMatcher(None, left_lines, right_lines)
         self._opcodes = list(matcher.get_opcodes())
-        for index, (tag, i1, i2, j1, j2) in enumerate(self._opcodes):
-        self.opcodes = []
+        self.opcodes = list(self._opcodes)
         self.merge_decisions.clear()
-
-        matcher = difflib.SequenceMatcher(None, left_lines, right_lines)
-        self.opcodes = list(matcher.get_opcodes())
 
         for index, (tag, i1, i2, j1, j2) in enumerate(self.opcodes):
             if tag == "equal":
@@ -554,6 +590,7 @@ class DiffMergeApp:
             )
 
         self._refresh_merge_from_decisions()
+        self._refresh_decision_indicators()
 
         if not self.blocks:
             self.update_status("The documents are identical.")
@@ -649,23 +686,30 @@ class DiffMergeApp:
         if self.current_block_index is None:
             messagebox.showinfo("Merge", "No difference selected.")
             return
+        previous_index = self.current_block_index
         block = self.blocks[self.current_block_index]
-        left_text = self._extract_range(self.left_text, block.left_range)
-        right_text = self._extract_range(self.right_text, block.right_range)
 
         block.decision = prefer
         self.merge_decisions[block.opcode_index] = prefer
         self._refresh_merge_from_decisions()
+        self._refresh_decision_indicators()
         decision_text = self._decision_label(prefer)
-        self.update_status(
-            f"Updated difference {self.current_block_index + 1} selection: {decision_text}"
-        )
+        if self.blocks:
+            self.next_block()
+            current_block = self.blocks[self.current_block_index]
+            current_decision = self._decision_label(current_block.decision)
+            self.update_status(
+                f"Decision for difference {previous_index + 1}: {decision_text}. "
+                f"Viewing difference {self.current_block_index + 1} of {len(self.blocks)}"
+                f" – Decision: {current_decision}"
+            )
 
     def clear_merge(self) -> None:
         self.merge_decisions.clear()
         for block in self.blocks:
             block.decision = None
         self._refresh_merge_from_decisions()
+        self._refresh_decision_indicators()
         self.update_status("Reset merge selections.")
 
     def save_merge(self) -> None:
@@ -735,6 +779,10 @@ class DiffMergeApp:
             None: "Undecided",
         }
         return mapping.get(decision, "Undecided")
+
+    @staticmethod
+    def _decision_symbol(decision: Optional[str]) -> str:
+        return DECISION_SYMBOLS.get(decision, DECISION_SYMBOLS[None])
 
     def _clear_highlights(self) -> None:
         for tag in self.left_diff_tags:
