@@ -30,8 +30,8 @@ Anschließend öffnet sich ein Fenster mit drei Bereichen:
    Alternativ können Sie Text direkt in die Felder einfügen.
 2. Mit **Compare** werden die Unterschiede analysiert und farbig markiert.
 3. Aktivieren Sie bei Bedarf die Checkbox **Sync View**, um beide Dokumente
-   synchronisiert zu scrollen und gleiche Zeilen nebeneinander angezeigt zu
-   bekommen.
+   synchronisiert zu scrollen und gleiche Zeilen anhand der Zeilennummern
+   nebeneinander ausgerichtet zu behalten.
 4. Mit **Previous Difference** und **Next Difference** navigieren Sie durch die
    gefundenen Unterschiede.
 5. Verwenden Sie **Use Left**, **Use Right** oder **Copy Both**, um den jeweils
@@ -41,6 +41,8 @@ Anschließend öffnet sich ein Fenster mit drei Bereichen:
 
 ## Hinweise
 
+* Jedes Textfeld besitzt einen Zeilennummernrand, damit Sie Änderungen leichter
+  zuordnen können.
 * Unterschiede im linken Text werden rosafarben, im rechten hellblau
   hervorgehoben. Gemeinsame Ersetzungen erscheinen beige, die aktuell
   ausgewählte Differenz gelb.

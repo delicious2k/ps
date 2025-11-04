@@ -9,7 +9,7 @@ dependencies.
 import difflib
 import tkinter as tk
 from tkinter import filedialog, messagebox
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class DiffBlock:
@@ -43,6 +43,7 @@ class DiffMergeApp:
         self.blocks: List[DiffBlock] = []
         self.current_block_index: Optional[int] = None
         self._sync_in_progress = False
+        self.line_number_canvases: Dict[tk.Text, tk.Canvas] = {}
 
         self._build_ui()
 
@@ -151,25 +152,91 @@ class DiffMergeApp:
         container = tk.Frame(frame)
         container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
+        line_numbers = tk.Canvas(
+            container,
+            width=50,
+            highlightthickness=0,
+            background="#f7f7f7",
+        )
         text = tk.Text(container, wrap=tk.NONE, undo=True)
         y_scroll = tk.Scrollbar(container, orient=tk.VERTICAL, command=text.yview)
         x_scroll = tk.Scrollbar(container, orient=tk.HORIZONTAL, command=text.xview)
         text.configure(xscrollcommand=x_scroll.set)
 
         container.grid_rowconfigure(0, weight=1)
-        container.grid_columnconfigure(0, weight=1)
+        container.grid_columnconfigure(1, weight=1)
 
-        text.grid(row=0, column=0, sticky="nsew")
-        y_scroll.grid(row=0, column=1, sticky="ns")
-        x_scroll.grid(row=1, column=0, sticky="ew")
+        line_numbers.grid(row=0, column=0, sticky="ns")
+        text.grid(row=0, column=1, sticky="nsew")
+        y_scroll.grid(row=0, column=2, sticky="ns")
+        x_scroll.grid(row=1, column=1, sticky="ew")
 
         frame.text_widget = text  # type: ignore[attr-defined]
         frame.y_scroll = y_scroll  # type: ignore[attr-defined]
+        frame.line_numbers = line_numbers  # type: ignore[attr-defined]
+
+        self._register_line_numbers(text, line_numbers)
+        self.root.after_idle(lambda widget=text: self._update_line_numbers(widget))
+
         return frame
 
     @staticmethod
     def _text_widget_from_frame(frame: tk.Frame) -> tk.Text:
         return frame.text_widget  # type: ignore[attr-defined]
+
+    def _register_line_numbers(self, widget: tk.Text, canvas: tk.Canvas) -> None:
+        self.line_number_canvases[widget] = canvas
+        widget.bind(
+            "<<Modified>>",
+            lambda event, widget=widget: self._on_text_modified(widget),
+            add=True,
+        )
+        widget.bind(
+            "<Configure>",
+            lambda event, widget=widget: self._update_line_numbers(widget),
+            add=True,
+        )
+        try:
+            widget.edit_modified(False)
+        except tk.TclError:
+            pass
+
+    def _on_text_modified(self, widget: tk.Text) -> None:
+        try:
+            widget.edit_modified(False)
+        except tk.TclError:
+            pass
+        self._update_line_numbers(widget)
+
+    def _update_line_numbers(self, widget: tk.Text) -> None:
+        canvas = self.line_number_canvases.get(widget)
+        if not canvas:
+            return
+        canvas.delete("all")
+
+        total_lines = self._line_count(widget)
+        digits = max(2, len(str(total_lines)))
+        pixel_width = digits * 8 + 12
+        if canvas.winfo_width() != pixel_width:
+            canvas.config(width=pixel_width)
+
+        index = widget.index("@0,0")
+        font = widget.cget("font")
+        while True:
+            dline = widget.dlineinfo(index)
+            if dline is None:
+                break
+            y = dline[1]
+            line_number = index.split(".")[0]
+            canvas.create_text(
+                pixel_width - 6,
+                y,
+                anchor="ne",
+                text=line_number,
+                font=font,
+                fill="#555555",
+            )
+            index = widget.index(f"{line_number}.0 +1line")
 
     # -------------------------------------------------------- Drag & Drop --
     def _setup_drag_and_drop(self) -> None:
@@ -220,6 +287,7 @@ class DiffMergeApp:
         self, widget: tk.Text, scrollbar: tk.Scrollbar, first: str, last: str
     ) -> None:
         scrollbar.set(first, last)
+        self._update_line_numbers(widget)
         if not self.sync_var.get() or self._sync_in_progress:
             return
         partner = self.right_text if widget is self.left_text else self.left_text
@@ -227,6 +295,7 @@ class DiffMergeApp:
         self._sync_in_progress = True
         self._move_to_line(partner, line)
         self._sync_in_progress = False
+        self._update_line_numbers(partner)
 
     def _align_partner_scroll(self, widget: tk.Text) -> None:
         partner = self.right_text if widget is self.left_text else self.left_text
@@ -234,6 +303,8 @@ class DiffMergeApp:
         self._sync_in_progress = True
         self._move_to_line(partner, line)
         self._sync_in_progress = False
+        self._update_line_numbers(widget)
+        self._update_line_numbers(partner)
 
     def _first_visible_line(self, widget: tk.Text) -> int:
         try:
@@ -246,10 +317,20 @@ class DiffMergeApp:
         total_lines = self._line_count(widget)
         if total_lines <= 1:
             widget.yview_moveto(0.0)
+            self._update_line_numbers(widget)
             return
         target_line = min(max(line, 1), total_lines)
-        fraction = (target_line - 1) / (total_lines - 1)
-        widget.yview_moveto(fraction)
+        index = f"{target_line}.0"
+        try:
+            widget.see(index)
+            widget.update_idletasks()
+            pixels_from_start = widget.count("1.0", index, "ypixels")[0]
+            total_pixels = max(widget.count("1.0", "end", "ypixels")[0], 1)
+            widget.yview_moveto(pixels_from_start / total_pixels)
+        except tk.TclError:
+            fraction = (target_line - 1) / max(total_lines - 1, 1)
+            widget.yview_moveto(fraction)
+        self._update_line_numbers(widget)
 
     def _line_count(self, widget: tk.Text) -> int:
         try:
@@ -294,6 +375,7 @@ class DiffMergeApp:
             return
         widget.delete("1.0", tk.END)
         widget.insert("1.0", contents)
+        self._update_line_numbers(widget)
         self.update_status(f"Loaded {side} file: {path}")
 
     def compare_texts(self) -> None:
@@ -437,10 +519,12 @@ class DiffMergeApp:
         else:
             insert_point = tk.END
         self.merge_text.insert(insert_point, chosen)
+        self._update_line_numbers(self.merge_text)
         self.update_status("Appended selection to the merged document.")
 
     def clear_merge(self) -> None:
         self.merge_text.delete("1.0", tk.END)
+        self._update_line_numbers(self.merge_text)
         self.update_status("Cleared merged document.")
 
     def save_merge(self) -> None:
