@@ -7,6 +7,7 @@ dependencies.
 """
 
 import difflib
+from bisect import bisect_left
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from typing import Any, Dict, List, Optional, Tuple
@@ -47,6 +48,8 @@ class DiffMergeApp:
         self.current_block_index: Optional[int] = None
         self._sync_in_progress = False
         self.line_number_canvases: Dict[tk.Text, tk.Canvas] = {}
+        self._opcodes: List[Tuple[str, int, int, int, int]] = []
+        self._spacers_applied = False
         self.opcodes: List[Tuple[str, int, int, int, int]] = []
         self.merge_decisions: Dict[int, str] = {}
         self.left_lines: List[str] = []
@@ -122,6 +125,9 @@ class DiffMergeApp:
 
         self.left_y_scroll = left_frame.y_scroll  # type: ignore[attr-defined]
         self.right_y_scroll = right_frame.y_scroll  # type: ignore[attr-defined]
+
+        for widget in (self.left_text, self.right_text):
+            widget.tag_configure("spacer")
 
         self.left_text.configure(
             yscrollcommand=lambda first, last: self._on_text_scroll(
@@ -225,28 +231,51 @@ class DiffMergeApp:
         canvas.delete("all")
 
         total_lines = self._line_count(widget)
-        digits = max(2, len(str(total_lines)))
+        spacer_lines = self._spacer_line_numbers(widget)
+        visible_lines = max(total_lines - len(spacer_lines), 1)
+        digits = max(2, len(str(visible_lines)))
         pixel_width = digits * 8 + 12
         if canvas.winfo_width() != pixel_width:
             canvas.config(width=pixel_width)
 
         index = widget.index("@0,0")
         font = widget.cget("font")
+        spacer_set = set(spacer_lines)
         while True:
             dline = widget.dlineinfo(index)
             if dline is None:
                 break
             y = dline[1]
-            line_number = index.split(".")[0]
+            line_number_str = index.split(".")[0]
+            line_number = int(line_number_str)
+            next_index = widget.index(f"{line_number}.0 +1line")
+            if line_number in spacer_set:
+                index = next_index
+                continue
+            adjusted_number = line_number - bisect_left(spacer_lines, line_number)
             canvas.create_text(
                 pixel_width - 6,
                 y,
                 anchor="ne",
-                text=line_number,
+                text=str(max(adjusted_number, 1)),
                 font=font,
                 fill="#555555",
             )
-            index = widget.index(f"{line_number}.0 +1line")
+            index = next_index
+
+    def _spacer_line_numbers(self, widget: tk.Text) -> List[int]:
+        ranges = widget.tag_ranges("spacer")
+        if not ranges:
+            return []
+        lines: List[int] = []
+        for start, end in zip(ranges[::2], ranges[1::2]):
+            current = widget.index(start)
+            while widget.compare(current, "<", end):
+                line_number = int(current.split(".")[0])
+                lines.append(line_number)
+                current = widget.index(f"{line_number}.0 +1line")
+        lines.sort()
+        return lines
 
     # -------------------------------------------------------- Drag & Drop --
     def _setup_drag_and_drop(self) -> None:
@@ -282,11 +311,77 @@ class DiffMergeApp:
             path = path[1:-1]
         self._load_file_into_widget(path, widget, side)
 
+    # --------------------------------------------------- Spacer handling --
+    def _remove_spacer_lines(self) -> None:
+        for widget in (self.left_text, self.right_text):
+            ranges = list(widget.tag_ranges("spacer"))
+            if not ranges:
+                continue
+            for start, end in reversed(list(zip(ranges[::2], ranges[1::2]))):
+                widget.delete(start, end)
+            widget.tag_remove("spacer", "1.0", tk.END)
+            self._update_line_numbers(widget)
+        self._spacers_applied = False
+
+    def _apply_alignment_spacers(self) -> None:
+        if self._spacers_applied:
+            return
+        if not self._opcodes:
+            self._spacers_applied = True
+            return
+        self._remove_spacer_lines()
+        left_offset = 0
+        right_offset = 0
+        inserted = False
+        for tag, i1, i2, j1, j2 in self._opcodes:
+            if tag == "equal":
+                continue
+            left_len = i2 - i1
+            right_len = j2 - j1
+            if left_len == right_len:
+                continue
+            if left_len > right_len:
+                count = left_len - right_len
+                line = j2 + right_offset + 1
+                self._insert_spacer_lines(self.right_text, line, count)
+                right_offset += count
+            else:
+                count = right_len - left_len
+                line = i2 + left_offset + 1
+                self._insert_spacer_lines(self.left_text, line, count)
+                left_offset += count
+            inserted = True
+        if inserted:
+            for widget in (self.left_text, self.right_text):
+                self._update_line_numbers(widget)
+        self._spacers_applied = True
+
+    def _insert_spacer_lines(self, widget: tk.Text, line: int, count: int) -> None:
+        if count <= 0:
+            return
+        index = widget.index(f"{line}.0")
+        widget.insert(index, "\n" * count)
+        self._tag_spacer_lines(widget, line, count)
+
+    def _tag_spacer_lines(self, widget: tk.Text, start_line: int, count: int) -> None:
+        for offset in range(count):
+            line_number = start_line + offset
+            start_index = widget.index(f"{line_number}.0")
+            end_index = widget.index(f"{line_number}.0 +1line")
+            widget.tag_add("spacer", start_index, end_index)
+
+    def _is_spacer_line(self, widget: tk.Text, line: int) -> bool:
+        start_index = widget.index(f"{line}.0")
+        end_index = widget.index(f"{line}.0 +1line")
+        return bool(widget.tag_nextrange("spacer", start_index, end_index))
+
     # ----------------------------------------------------- Sync Handling --
     def toggle_sync_view(self) -> None:
         if not self.sync_var.get():
+            self._remove_spacer_lines()
             self.update_status("Sync view disabled.")
             return
+        self._apply_alignment_spacers()
         focus_widget = self.root.focus_get()
         if focus_widget not in (self.left_text, self.right_text):
             focus_widget = self.left_text
@@ -385,6 +480,8 @@ class DiffMergeApp:
             self._load_file_into_widget(path, self.right_text, "right")
 
     def _load_file_into_widget(self, path: str, widget: tk.Text, side: str) -> None:
+        self._remove_spacer_lines()
+        self._opcodes = []
         try:
             with open(path, "r", encoding="utf-8") as file:
                 contents = file.read()
@@ -397,15 +494,24 @@ class DiffMergeApp:
         self.update_status(f"Loaded {side} file: {path}")
 
     def compare_texts(self) -> None:
+
+        self._remove_spacer_lines()
+
         left_lines = self.left_text.get("1.0", tk.END).splitlines(keepends=True)
         right_lines = self.right_text.get("1.0", tk.END).splitlines(keepends=True)
 
         self.left_lines = left_lines
         self.right_lines = right_lines
 
+
         self._clear_highlights()
         self.blocks.clear()
         self.current_block_index = None
+        self._opcodes = []
+
+        matcher = difflib.SequenceMatcher(None, left_lines, right_lines)
+        self._opcodes = list(matcher.get_opcodes())
+        for index, (tag, i1, i2, j1, j2) in enumerate(self._opcodes):
         self.opcodes = []
         self.merge_decisions.clear()
 
@@ -452,6 +558,11 @@ class DiffMergeApp:
         if not self.blocks:
             self.update_status("The documents are identical.")
             return
+
+        if self.sync_var.get():
+            self._apply_alignment_spacers()
+        else:
+            self._spacers_applied = False
 
         self.update_status(f"Found {len(self.blocks)} differing block(s).")
         self.current_block_index = 0
@@ -577,9 +688,14 @@ class DiffMergeApp:
         start, end = text_range
         if start == end:
             return ""
-        start_index = f"{start + 1}.0"
-        end_index = widget.index(f"{end}.0 lineend +1c")
-        return widget.get(start_index, end_index)
+        pieces: List[str] = []
+        for line in range(start + 1, end + 1):
+            if self._is_spacer_line(widget, line):
+                continue
+            line_start = widget.index(f"{line}.0")
+            line_end = widget.index(f"{line}.0 +1line")
+            pieces.append(widget.get(line_start, line_end))
+        return "".join(pieces)
 
     def _refresh_merge_from_decisions(self) -> None:
         if not self.opcodes:
