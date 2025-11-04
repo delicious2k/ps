@@ -105,7 +105,12 @@ class DiffMergeApp:
         self.right_text.tag_configure("insert", background="#e8f4ff")
         for widget in (self.left_text, self.right_text):
             widget.tag_configure("replace", background="#fff4e5")
-            widget.tag_configure("current", background="#fff2a8")
+            widget.tag_configure(
+                "current",
+                background="#ffe066",
+                borderwidth=2,
+                relief="solid",
+            )
 
         self._setup_drag_and_drop()
 
@@ -297,6 +302,7 @@ class DiffMergeApp:
         start_index = f"{start + 1}.0"
         end_index = widget.index(f"{end}.0 lineend +1c")
         widget.tag_add("current", start_index, end_index)
+        widget.tag_raise("current")
         widget.see(start_index)
 
     def merge_left(self) -> None:
