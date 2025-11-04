@@ -43,6 +43,9 @@ class DiffMergeApp:
         self.blocks: List[DiffBlock] = []
         self.current_block_index: Optional[int] = None
         self._sync_in_progress = False
+        self._padding_in_progress = False
+        self._sync_padding_active = False
+        self._placeholder_tag = "sync_placeholder"
         self.line_number_canvases: Dict[tk.Text, tk.Canvas] = {}
 
         self._build_ui()
@@ -206,6 +209,8 @@ class DiffMergeApp:
             widget.edit_modified(False)
         except tk.TclError:
             pass
+        if self._sync_padding_active and not self._padding_in_progress:
+            self._remove_all_sync_padding()
         self._update_line_numbers(widget)
 
     def _update_line_numbers(self, widget: tk.Text) -> None:
@@ -215,7 +220,8 @@ class DiffMergeApp:
         canvas.delete("all")
 
         total_lines = self._line_count(widget)
-        digits = max(2, len(str(total_lines)))
+        real_total = self._real_line_count(widget)
+        digits = max(2, len(str(real_total)))
         pixel_width = digits * 8 + 12
         if canvas.winfo_width() != pixel_width:
             canvas.config(width=pixel_width)
@@ -227,12 +233,20 @@ class DiffMergeApp:
             if dline is None:
                 break
             y = dline[1]
-            line_number = index.split(".")[0]
+            line_number_str = index.split(".")[0]
+            try:
+                line_number = int(line_number_str)
+            except ValueError:
+                break
+            if self._line_is_placeholder(widget, line_number):
+                index = widget.index(f"{line_number}.0 +1line")
+                continue
+            real_number = self._display_to_real_line(widget, line_number)
             canvas.create_text(
                 pixel_width - 6,
                 y,
                 anchor="ne",
-                text=line_number,
+                text=str(real_number),
                 font=font,
                 fill="#555555",
             )
@@ -275,8 +289,10 @@ class DiffMergeApp:
     # ----------------------------------------------------- Sync Handling --
     def toggle_sync_view(self) -> None:
         if not self.sync_var.get():
+            self._remove_all_sync_padding()
             self.update_status("Sync view disabled.")
             return
+        self._apply_sync_padding()
         focus_widget = self.root.focus_get()
         if focus_widget not in (self.left_text, self.right_text):
             focus_widget = self.left_text
@@ -346,6 +362,137 @@ class DiffMergeApp:
         except (ValueError, tk.TclError):
             return 1
 
+    def _real_line_count(self, widget: tk.Text) -> int:
+        try:
+            total = max(int(widget.index("end-1c").split(".")[0]), 1)
+        except (ValueError, tk.TclError):
+            return 1
+        placeholder_ranges = widget.tag_ranges(self._placeholder_tag)
+        placeholder_lines = len(placeholder_ranges) // 2
+        real_total = total - placeholder_lines
+        return real_total if real_total > 0 else 1
+
+    def _line_is_placeholder(self, widget: tk.Text, line_number: int) -> bool:
+        try:
+            start = f"{line_number}.0"
+            end = widget.index(f"{line_number}.0 lineend +1c")
+        except tk.TclError:
+            return False
+        return bool(widget.tag_nextrange(self._placeholder_tag, start, end))
+
+    def _display_to_real_line(self, widget: tk.Text, display_line: int) -> int:
+        if not self._sync_padding_active:
+            return max(display_line, 1)
+        if display_line <= 1:
+            return 1
+        count = 0
+        start = "1.0"
+        target = f"{display_line}.0"
+        while True:
+            range_tuple = widget.tag_nextrange(self._placeholder_tag, start, target)
+            if not range_tuple:
+                break
+            count += 1
+            start = range_tuple[1]
+        result = display_line - count
+        return result if result > 0 else 1
+
+    def _real_to_display_line(self, widget: tk.Text, real_line: int) -> int:
+        if not self._sync_padding_active or real_line <= 1:
+            return max(real_line, 1)
+        total_display = self._line_count(widget)
+        real_seen = 0
+        for display_line in range(1, total_display + 1):
+            if self._line_is_placeholder(widget, display_line):
+                continue
+            real_seen += 1
+            if real_seen == real_line:
+                return display_line
+        return total_display
+
+    def _real_line_to_index(self, widget: tk.Text, real_line: int) -> str:
+        display_line = self._real_to_display_line(widget, real_line)
+        return f"{display_line}.0"
+
+    def _get_widget_lines(self, widget: tk.Text) -> List[str]:
+        contents = widget.get("1.0", "end-1c")
+        if not contents:
+            return []
+        return contents.splitlines()
+
+    def _line_insertion_index(self, widget: tk.Text, line_index: int) -> str:
+        try:
+            end_line = int(widget.index("end-1c").split(".")[0])
+        except (ValueError, tk.TclError):
+            return tk.END
+        if line_index >= end_line:
+            return "end-1c"
+        return f"{line_index + 1}.0"
+
+    def _insert_placeholders(self, widget: tk.Text, line_index: int, count: int) -> None:
+        if count <= 0:
+            return
+        index = self._line_insertion_index(widget, line_index)
+        for _ in range(count):
+            widget.insert(index, "\n", self._placeholder_tag)
+            new_index = widget.index(f"{index} +1line")
+            if new_index == index:
+                new_index = widget.index(f"{index} +1char")
+            index = new_index
+
+    def _remove_sync_padding(self, widget: tk.Text) -> None:
+        while True:
+            range_tuple = widget.tag_nextrange(self._placeholder_tag, "1.0")
+            if not range_tuple:
+                break
+            widget.delete(range_tuple[0], range_tuple[1])
+        widget.tag_remove(self._placeholder_tag, "1.0", tk.END)
+
+    def _remove_all_sync_padding(self) -> None:
+        if not self._sync_padding_active:
+            return
+        self._padding_in_progress = True
+        try:
+            for widget in (self.left_text, self.right_text):
+                self._remove_sync_padding(widget)
+        finally:
+            self._padding_in_progress = False
+        self._sync_padding_active = False
+        for widget in (self.left_text, self.right_text):
+            self._update_line_numbers(widget)
+
+    def _apply_sync_padding(self) -> None:
+        self._remove_all_sync_padding()
+        left_lines = self._get_widget_lines(self.left_text)
+        right_lines = self._get_widget_lines(self.right_text)
+        if not left_lines and not right_lines:
+            self._sync_padding_active = False
+            return
+        matcher = difflib.SequenceMatcher(None, left_lines, right_lines)
+        left_offset = 0
+        right_offset = 0
+        placeholders_added = False
+        self._padding_in_progress = True
+        try:
+            for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                left_len = i2 - i1
+                right_len = j2 - j1
+                if right_len > left_len:
+                    insert_line = i2 + left_offset
+                    self._insert_placeholders(self.left_text, insert_line, right_len - left_len)
+                    left_offset += right_len - left_len
+                    placeholders_added = True
+                elif left_len > right_len:
+                    insert_line = j2 + right_offset
+                    self._insert_placeholders(self.right_text, insert_line, left_len - right_len)
+                    right_offset += left_len - right_len
+                    placeholders_added = True
+        finally:
+            self._padding_in_progress = False
+        self._sync_padding_active = placeholders_added
+        self._update_line_numbers(self.left_text)
+        self._update_line_numbers(self.right_text)
+
     def _on_mousewheel(self, event: Any) -> str:
         widget = event.widget
         if not isinstance(widget, tk.Text):
@@ -381,12 +528,14 @@ class DiffMergeApp:
         except OSError as exc:
             messagebox.showerror("Error", f"Could not open file:\n{exc}")
             return
+        self._remove_all_sync_padding()
         widget.delete("1.0", tk.END)
         widget.insert("1.0", contents)
         self._update_line_numbers(widget)
         self.update_status(f"Loaded {side} file: {path}")
 
     def compare_texts(self) -> None:
+        self._remove_all_sync_padding()
         left_lines = self.left_text.get("1.0", tk.END).splitlines()
         right_lines = self.right_text.get("1.0", tk.END).splitlines()
 
@@ -430,6 +579,8 @@ class DiffMergeApp:
         self.update_status(f"Found {len(self.blocks)} differing block(s).")
         self.current_block_index = 0
         self._apply_current_block()
+        if self.sync_var.get():
+            self._apply_sync_padding()
 
     def _highlight_block(
         self, widget: tk.Text, tag_name: str, style_tag: str, start: int, end: int
@@ -488,8 +639,9 @@ class DiffMergeApp:
         start, end = text_range
         if start == end:
             return
-        start_index = f"{start + 1}.0"
-        end_index = widget.index(f"{end}.0 lineend +1c")
+        start_index = self._real_line_to_index(widget, start + 1)
+        end_line_index = self._real_line_to_index(widget, end)
+        end_index = widget.index(f"{end_line_index} lineend +1c")
         widget.tag_add("current", start_index, end_index)
         widget.tag_raise("current")
         widget.see(start_index)
@@ -555,8 +707,9 @@ class DiffMergeApp:
         start, end = text_range
         if start == end:
             return ""
-        start_index = f"{start + 1}.0"
-        end_index = widget.index(f"{end}.0 lineend +1c")
+        start_index = self._real_line_to_index(widget, start + 1)
+        end_line_index = self._real_line_to_index(widget, end)
+        end_index = widget.index(f"{end_line_index} lineend +1c")
         return widget.get(start_index, end_index)
 
     def _clear_highlights(self) -> None:
