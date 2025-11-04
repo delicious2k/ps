@@ -29,11 +29,14 @@ Anschließend öffnet sich ein Fenster mit drei Bereichen:
 1. Klicken Sie auf **Load Left** bzw. **Load Right**, um die Dateien zu laden.
    Alternativ können Sie Text direkt in die Felder einfügen.
 2. Mit **Compare** werden die Unterschiede analysiert und farbig markiert.
-3. Mit **Previous Difference** und **Next Difference** navigieren Sie durch die
+3. Aktivieren Sie bei Bedarf die Checkbox **Sync View**, um beide Dokumente
+   synchronisiert zu scrollen und gleiche Zeilen nebeneinander angezeigt zu
+   bekommen.
+4. Mit **Previous Difference** und **Next Difference** navigieren Sie durch die
    gefundenen Unterschiede.
-4. Verwenden Sie **Use Left**, **Use Right** oder **Copy Both**, um den jeweils
+5. Verwenden Sie **Use Left**, **Use Right** oder **Copy Both**, um den jeweils
    markierten Unterschied in den Bereich *Merged Result* zu übernehmen.
-5. **Clear Merge** leert den Merge-Bereich, **Save Merge** speichert das Ergebnis
+6. **Clear Merge** leert den Merge-Bereich, **Save Merge** speichert das Ergebnis
    in eine Datei.
 
 ## Hinweise
@@ -42,4 +45,6 @@ Anschließend öffnet sich ein Fenster mit drei Bereichen:
   hervorgehoben. Gemeinsame Ersetzungen erscheinen beige, die aktuell
   ausgewählte Differenz gelb.
 * Die Anwendung arbeitet zeilenbasiert.
+* Mit aktivierter **Sync View**-Option bleiben gleiche Zeilen beim Scrollen
+  nebeneinander ausgerichtet.
 * Für sehr große Dateien kann der Vergleich einige Zeit in Anspruch nehmen.

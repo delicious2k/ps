@@ -42,6 +42,7 @@ class DiffMergeApp:
         self.right_diff_tags: List[str] = []
         self.blocks: List[DiffBlock] = []
         self.current_block_index: Optional[int] = None
+        self._sync_in_progress = False
 
         self._build_ui()
 
@@ -59,6 +60,13 @@ class DiffMergeApp:
         tk.Button(button_bar, text="Compare", command=self.compare_texts).pack(
             side=tk.LEFT, padx=10
         )
+        self.sync_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            button_bar,
+            text="Sync View",
+            variable=self.sync_var,
+            command=self.toggle_sync_view,
+        ).pack(side=tk.LEFT, padx=2)
         tk.Button(button_bar, text="Previous Difference", command=self.prev_block).pack(
             side=tk.LEFT, padx=2
         )
@@ -101,6 +109,27 @@ class DiffMergeApp:
         self.right_text = self._text_widget_from_frame(right_frame)
         self.merge_text = self._text_widget_from_frame(merge_frame)
 
+        self.left_y_scroll = left_frame.y_scroll  # type: ignore[attr-defined]
+        self.right_y_scroll = right_frame.y_scroll  # type: ignore[attr-defined]
+
+        self.left_text.configure(
+            yscrollcommand=lambda first, last: self._on_text_scroll(
+                self.left_text, self.left_y_scroll, first, last
+            )
+        )
+        self.right_text.configure(
+            yscrollcommand=lambda first, last: self._on_text_scroll(
+                self.right_text, self.right_y_scroll, first, last
+            )
+        )
+
+        self.left_text.bind("<MouseWheel>", self._on_mousewheel, add=True)
+        self.right_text.bind("<MouseWheel>", self._on_mousewheel, add=True)
+        self.left_text.bind("<Button-4>", self._on_mousewheel, add=True)
+        self.left_text.bind("<Button-5>", self._on_mousewheel, add=True)
+        self.right_text.bind("<Button-4>", self._on_mousewheel, add=True)
+        self.right_text.bind("<Button-5>", self._on_mousewheel, add=True)
+
         self.left_text.tag_configure("delete", background="#ffecec")
         self.right_text.tag_configure("insert", background="#e8f4ff")
         for widget in (self.left_text, self.right_text):
@@ -125,7 +154,7 @@ class DiffMergeApp:
         text = tk.Text(container, wrap=tk.NONE, undo=True)
         y_scroll = tk.Scrollbar(container, orient=tk.VERTICAL, command=text.yview)
         x_scroll = tk.Scrollbar(container, orient=tk.HORIZONTAL, command=text.xview)
-        text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        text.configure(xscrollcommand=x_scroll.set)
 
         container.grid_rowconfigure(0, weight=1)
         container.grid_columnconfigure(0, weight=1)
@@ -135,6 +164,7 @@ class DiffMergeApp:
         x_scroll.grid(row=1, column=0, sticky="ew")
 
         frame.text_widget = text  # type: ignore[attr-defined]
+        frame.y_scroll = y_scroll  # type: ignore[attr-defined]
         return frame
 
     @staticmethod
@@ -174,6 +204,75 @@ class DiffMergeApp:
         if path.startswith("{") and path.endswith("}"):
             path = path[1:-1]
         self._load_file_into_widget(path, widget, side)
+
+    # ----------------------------------------------------- Sync Handling --
+    def toggle_sync_view(self) -> None:
+        if not self.sync_var.get():
+            self.update_status("Sync view disabled.")
+            return
+        focus_widget = self.root.focus_get()
+        if focus_widget not in (self.left_text, self.right_text):
+            focus_widget = self.left_text
+        self._align_partner_scroll(focus_widget)  # type: ignore[arg-type]
+        self.update_status("Sync view enabled. Scrolls are now linked.")
+
+    def _on_text_scroll(
+        self, widget: tk.Text, scrollbar: tk.Scrollbar, first: str, last: str
+    ) -> None:
+        scrollbar.set(first, last)
+        if not self.sync_var.get() or self._sync_in_progress:
+            return
+        partner = self.right_text if widget is self.left_text else self.left_text
+        line = self._first_visible_line(widget)
+        self._sync_in_progress = True
+        self._move_to_line(partner, line)
+        self._sync_in_progress = False
+
+    def _align_partner_scroll(self, widget: tk.Text) -> None:
+        partner = self.right_text if widget is self.left_text else self.left_text
+        line = self._first_visible_line(widget)
+        self._sync_in_progress = True
+        self._move_to_line(partner, line)
+        self._sync_in_progress = False
+
+    def _first_visible_line(self, widget: tk.Text) -> int:
+        try:
+            index = widget.index("@0,0")
+            return max(int(index.split(".")[0]), 1)
+        except (ValueError, tk.TclError):
+            return 1
+
+    def _move_to_line(self, widget: tk.Text, line: int) -> None:
+        total_lines = self._line_count(widget)
+        if total_lines <= 1:
+            widget.yview_moveto(0.0)
+            return
+        target_line = min(max(line, 1), total_lines)
+        fraction = (target_line - 1) / (total_lines - 1)
+        widget.yview_moveto(fraction)
+
+    def _line_count(self, widget: tk.Text) -> int:
+        try:
+            return max(int(widget.index("end-1c").split(".")[0]), 1)
+        except (ValueError, tk.TclError):
+            return 1
+
+    def _on_mousewheel(self, event: Any) -> str:
+        widget = event.widget
+        if not isinstance(widget, tk.Text):
+            return "break"
+        if getattr(event, "delta", 0):
+            delta = event.delta
+            if abs(delta) < 120:
+                step = -1 if delta > 0 else 1
+            else:
+                step = int(-delta / 120)
+            widget.yview_scroll(step, "units")
+        elif getattr(event, "num", None) == 4:
+            widget.yview_scroll(-1, "units")
+        elif getattr(event, "num", None) == 5:
+            widget.yview_scroll(1, "units")
+        return "break"
 
     # -------------------------------------------------------------- Actions --
     def load_left(self) -> None:
