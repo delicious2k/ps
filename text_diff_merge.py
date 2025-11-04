@@ -9,7 +9,7 @@ dependencies.
 import difflib
 import tkinter as tk
 from tkinter import filedialog, messagebox
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 
 class DiffBlock:
@@ -86,16 +86,16 @@ class DiffMergeApp:
         status_bar = tk.Label(self.root, textvariable=self.status_var, anchor="w")
         status_bar.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(0, 6))
 
-        panes = tk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        panes = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, sashrelief=tk.RAISED)
         panes.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
         left_frame = self._build_text_panel(panes, "Left Document")
         right_frame = self._build_text_panel(panes, "Right Document")
         merge_frame = self._build_text_panel(panes, "Merged Result")
 
-        panes.add(left_frame)
-        panes.add(right_frame)
-        panes.add(merge_frame)
+        panes.add(left_frame, minsize=200, stretch="always")
+        panes.add(right_frame, minsize=200, stretch="always")
+        panes.add(merge_frame, minsize=200, stretch="always")
 
         self.left_text = self._text_widget_from_frame(left_frame)
         self.right_text = self._text_widget_from_frame(right_frame)
@@ -107,19 +107,27 @@ class DiffMergeApp:
             widget.tag_configure("replace", background="#fff4e5")
             widget.tag_configure("current", background="#fff2a8")
 
+        self._setup_drag_and_drop()
+
     def _build_text_panel(self, parent: tk.PanedWindow, title: str) -> tk.Frame:
         frame = tk.Frame(parent)
         label = tk.Label(frame, text=title)
         label.pack(side=tk.TOP, anchor="w")
 
-        text = tk.Text(frame, wrap=tk.NONE, undo=True)
-        y_scroll = tk.Scrollbar(frame, command=text.yview)
-        x_scroll = tk.Scrollbar(frame, orient=tk.HORIZONTAL, command=text.xview)
+        container = tk.Frame(frame)
+        container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        text = tk.Text(container, wrap=tk.NONE, undo=True)
+        y_scroll = tk.Scrollbar(container, orient=tk.VERTICAL, command=text.yview)
+        x_scroll = tk.Scrollbar(container, orient=tk.HORIZONTAL, command=text.xview)
         text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
 
-        text.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        y_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        x_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        container.grid_rowconfigure(0, weight=1)
+        container.grid_columnconfigure(0, weight=1)
+
+        text.grid(row=0, column=0, sticky="nsew")
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
 
         frame.text_widget = text  # type: ignore[attr-defined]
         return frame
@@ -128,34 +136,61 @@ class DiffMergeApp:
     def _text_widget_from_frame(frame: tk.Frame) -> tk.Text:
         return frame.text_widget  # type: ignore[attr-defined]
 
+    # -------------------------------------------------------- Drag & Drop --
+    def _setup_drag_and_drop(self) -> None:
+        try:
+            self.root.tk.eval("package require tkdnd")
+        except tk.TclError:
+            base_message = self.status_var.get()
+            self.status_var.set(
+                f"{base_message}\nDrag and drop not available (tkdnd package missing)."
+            )
+            return
+
+        for widget, side in (
+            (self.left_text, "left"),
+            (self.right_text, "right"),
+        ):
+            try:
+                widget.drop_target_register("DND_Files")
+                widget.dnd_bind(
+                    "<<Drop>>",
+                    lambda event, side=side, widget=widget: self._on_drop(event, widget, side),
+                )
+            except tk.TclError:
+                # If binding fails on one widget, continue without drag-and-drop.
+                continue
+
+    def _on_drop(self, event: Any, widget: tk.Text, side: str) -> None:
+        paths = self.root.tk.splitlist(event.data)
+        if not paths:
+            return
+        path = paths[0]
+        if path.startswith("{") and path.endswith("}"):
+            path = path[1:-1]
+        self._load_file_into_widget(path, widget, side)
+
     # -------------------------------------------------------------- Actions --
     def load_left(self) -> None:
         path = filedialog.askopenfilename(title="Open Left File")
-        if not path:
-            return
-        try:
-            with open(path, "r", encoding="utf-8") as file:
-                contents = file.read()
-        except OSError as exc:
-            messagebox.showerror("Error", f"Could not open file:\n{exc}")
-            return
-        self.left_text.delete("1.0", tk.END)
-        self.left_text.insert("1.0", contents)
-        self.update_status(f"Loaded left file: {path}")
+        if path:
+            self._load_file_into_widget(path, self.left_text, "left")
 
     def load_right(self) -> None:
         path = filedialog.askopenfilename(title="Open Right File")
-        if not path:
-            return
+        if path:
+            self._load_file_into_widget(path, self.right_text, "right")
+
+    def _load_file_into_widget(self, path: str, widget: tk.Text, side: str) -> None:
         try:
             with open(path, "r", encoding="utf-8") as file:
                 contents = file.read()
         except OSError as exc:
             messagebox.showerror("Error", f"Could not open file:\n{exc}")
             return
-        self.right_text.delete("1.0", tk.END)
-        self.right_text.insert("1.0", contents)
-        self.update_status(f"Loaded right file: {path}")
+        widget.delete("1.0", tk.END)
+        widget.insert("1.0", contents)
+        self.update_status(f"Loaded {side} file: {path}")
 
     def compare_texts(self) -> None:
         left_lines = self.left_text.get("1.0", tk.END).splitlines()
