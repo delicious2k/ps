@@ -7,6 +7,7 @@ dependencies.
 """
 
 import difflib
+import re
 from bisect import bisect_left
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -63,6 +64,8 @@ class DiffMergeApp:
         self.merge_decisions: Dict[int, str] = {}
         self.left_lines: List[str] = []
         self.right_lines: List[str] = []
+        self.left_file_path: Optional[str] = None
+        self.right_file_path: Optional[str] = None
 
         self._build_ui()
 
@@ -79,6 +82,12 @@ class DiffMergeApp:
         )
         tk.Button(button_bar, text="Compare", command=self.compare_texts).pack(
             side=tk.LEFT, padx=10
+        )
+        tk.Button(button_bar, text="Import Patch", command=self.import_patch).pack(
+            side=tk.LEFT, padx=2
+        )
+        tk.Button(button_bar, text="Export Patch", command=self.export_patch).pack(
+            side=tk.LEFT, padx=2
         )
         self.sync_var = tk.BooleanVar(value=False)
         tk.Checkbutton(
@@ -532,6 +541,10 @@ class DiffMergeApp:
         widget.insert("1.0", contents)
         self._update_line_numbers(widget)
         self.update_status(f"Loaded {side} file: {path}")
+        if side == "left":
+            self.left_file_path = path
+        elif side == "right":
+            self.right_file_path = path
 
     def compare_texts(self) -> None:
 
@@ -728,6 +741,69 @@ class DiffMergeApp:
             return
         self.update_status(f"Merged file saved to: {path}")
 
+    def import_patch(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Import Patch File",
+            filetypes=(("Patch files", "*.patch *.diff"), ("All files", "*.*")),
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as file:
+                patch_lines = file.read().splitlines(keepends=True)
+        except OSError as exc:
+            messagebox.showerror("Import Patch", f"Could not open patch file:\n{exc}")
+            return
+
+        original_text = self.left_text.get("1.0", "end-1c")
+        original_lines = original_text.splitlines(keepends=True)
+        try:
+            patched_lines = self._apply_unified_patch(original_lines, patch_lines)
+        except ValueError as exc:
+            messagebox.showerror("Import Patch", f"Could not apply patch:\n{exc}")
+            return
+
+        self.right_text.delete("1.0", tk.END)
+        self.right_text.insert("1.0", "".join(patched_lines))
+        self._update_line_numbers(self.right_text)
+        self.right_file_path = None
+        self.update_status(f"Applied patch to right document from: {path}")
+        self.compare_texts()
+
+    def export_patch(self) -> None:
+        left_text = self.left_text.get("1.0", "end-1c")
+        right_text = self.right_text.get("1.0", "end-1c")
+        left_lines = left_text.splitlines(keepends=True)
+        right_lines = right_text.splitlines(keepends=True)
+
+        diff_lines = list(
+            difflib.unified_diff(
+                left_lines,
+                right_lines,
+                fromfile=self.left_file_path or "left.txt",
+                tofile=self.right_file_path or "right.txt",
+            )
+        )
+
+        if not diff_lines:
+            messagebox.showinfo("Export Patch", "No differences to export.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Save Patch File",
+            defaultextension=".patch",
+            filetypes=(("Patch files", "*.patch"), ("Diff files", "*.diff"), ("All files", "*.*")),
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as file:
+                file.writelines(diff_lines)
+        except OSError as exc:
+            messagebox.showerror("Export Patch", f"Could not save patch file:\n{exc}")
+            return
+        self.update_status(f"Patch file saved to: {path}")
+
     def _extract_range(self, widget: tk.Text, text_range: Tuple[int, int]) -> str:
         start, end = text_range
         if start == end:
@@ -783,6 +859,78 @@ class DiffMergeApp:
     @staticmethod
     def _decision_symbol(decision: Optional[str]) -> str:
         return DECISION_SYMBOLS.get(decision, DECISION_SYMBOLS[None])
+
+    @staticmethod
+    def _apply_unified_patch(
+        original_lines: List[str], patch_lines: List[str]
+    ) -> List[str]:
+        if not patch_lines:
+            raise ValueError("Patch file is empty.")
+
+        hunk_header = re.compile(
+            r"^@@ -(?P<start>\d+)(?:,(?P<len>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_len>\d+))? @@"
+        )
+        result: List[str] = []
+        orig_index = 0
+        i = 0
+
+        while i < len(patch_lines):
+            line = patch_lines[i]
+            if line.startswith("---") or line.startswith("+++"):
+                i += 1
+                continue
+            if line.startswith("@@"):
+                match = hunk_header.match(line)
+                if not match:
+                    raise ValueError(f"Malformed hunk header: {line.strip()}")
+                start_line = int(match.group("start"))
+                target_index = max(start_line - 1, 0)
+                if target_index > len(original_lines):
+                    raise ValueError("Patch target is beyond original content.")
+                if target_index < orig_index:
+                    raise ValueError("Patch hunks overlap or are out of order.")
+                while orig_index < target_index:
+                    result.append(original_lines[orig_index])
+                    orig_index += 1
+                i += 1
+                while i < len(patch_lines):
+                    current = patch_lines[i]
+                    if current.startswith("@@"):
+                        break
+                    if current.startswith("---") or current.startswith("+++"):
+                        break
+                    if current.startswith("\\"):
+                        i += 1
+                        continue
+                    if not current:
+                        i += 1
+                        continue
+                    symbol = current[0]
+                    content = current[1:]
+                    if symbol == " ":
+                        if orig_index >= len(original_lines):
+                            raise ValueError("Patch context exceeds original size.")
+                        if original_lines[orig_index] != content:
+                            raise ValueError("Context mismatch while applying patch.")
+                        result.append(original_lines[orig_index])
+                        orig_index += 1
+                    elif symbol == "-":
+                        if orig_index >= len(original_lines):
+                            raise ValueError("Removal exceeds original content.")
+                        if original_lines[orig_index] != content:
+                            raise ValueError("Removal line does not match original content.")
+                        orig_index += 1
+                    elif symbol == "+":
+                        result.append(content)
+                    else:
+                        raise ValueError(f"Unexpected line in patch: {current!r}")
+                    i += 1
+                continue
+            i += 1
+
+        if orig_index < len(original_lines):
+            result.extend(original_lines[orig_index:])
+        return result
 
     def _clear_highlights(self) -> None:
         for tag in self.left_diff_tags:
